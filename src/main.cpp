@@ -37,6 +37,6 @@
 # include <dsn/utility/module_init.cpp.h>
 # include "explorer.h"
 
-MODULE_INIT_BEGIN(tools_common)
+MODULE_INIT_BEGIN(tools_explorer)
     dsn::tools::register_toollet<dsn::tools::explorer>("explorer");
 MODULE_INIT_END
