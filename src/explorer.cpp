@@ -491,11 +491,17 @@ namespace dsn
             ::dsn::register_command({ "explore", "exp" },
                 "explore the task dependencies as GraphViz dot graph",
                 "explore the task dependencies as GraphViz dot graph",
-                [](const std::vector<std::string>& args) 
+                [](const safe_vector<safe_string>& args) 
                 {
                     std::stringstream ss;
-                    all_task_explorer::instance().get_dot_graph(ss, args);
-                    return ss.str();
+
+                    std::vector<std::string> args2;
+                    for (auto& e : args)
+                    {
+                        args2.push_back(std::string(e.c_str()));
+                    }
+                    all_task_explorer::instance().get_dot_graph(ss, args2);
+                    return safe_string(ss.str().c_str());
                 }
                 );
         }

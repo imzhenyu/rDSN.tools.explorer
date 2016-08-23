@@ -18,17 +18,16 @@ before_build:
         
 build_script:
     - cmd: >-
-        del .\main\build\CMakeCache.txt
+        echo DSN_ROOT=%DSN_ROOT%
         
-        main\run.cmd build Debug .\main\build
+        dsn.run.cmd build Debug .\build
+        
+        dsn.run.cmd install Debug .\build
         
 test_script:
     - cmd: >-
-        cd main 
+        echo DSN_ROOT=%DSN_ROOT%
         
-        run.cmd test Debug .\build
-        
-        cd ..
-        
-        exit 0
+        dsn.run.cmd test Debug .\build
+
 
