@@ -38,6 +38,8 @@
 # include "explorer.h"
 # include <dsn/service_api_c.h>
 # include <dsn/tool-api/command.h>
+# include <fstream>
+# include <sstream>
 
 namespace dsn 
 {
@@ -49,7 +51,7 @@ namespace dsn
             task_explorer()
             {
                 int maxt = dsn_task_code_max();
-                _locals.resize((size_t)maxt, 0);
+                _locals.resize((size_t)maxt + 1, 0);
                 _msg_count.store(0);
                 _lpc_count.store(0);
             }
@@ -89,26 +91,97 @@ namespace dsn
             sprintf(buffer, "%d.%d", nid, task_code);
             return buffer;
         }
-        
-        static std::string explorer_get_task_label(int nid, int task_code)
-        {
-            char buffer[32];
-            sprintf(buffer, "%d", task_code);
-            return buffer;
 
-            /*std::string lb = task_spec::get(task_code)->name;
-            if (lb.length() > 4)
+        struct dot_task_config
+        {
+            std::string dot_label;
+            std::string dot_color;
+            std::string dot_shape;
+            std::string dot_style; // e.g., invis
+
+            // source(outedge) has a higher priority
+            std::string dot_out_style;
+            std::string dot_out_color;
+            std::string dot_in_style;
+            std::string dot_in_color;
+        };
+
+        CONFIG_BEGIN(dot_task_config)
+            CONFIG_FLD_STRING(dot_label, "", "vertex label")
+            CONFIG_FLD_STRING(dot_shape, "ellipse", "vertex shape(ellipse,box,egg,doublecircle,diamond,rectangle,triangle, ...)")
+            CONFIG_FLD_STRING(dot_color, "black", "vertex color")
+            CONFIG_FLD_STRING(dot_style, "solid", "vertex style (invis,solid,dashed,dotted,bold,filled,diagonals,rounded)")
+
+            CONFIG_FLD_STRING(dot_out_style, "", "out edge style (invis,solid,dashed,dotted,bold)")
+            CONFIG_FLD_STRING(dot_out_color, "", "out edge color")
+            CONFIG_FLD_STRING(dot_in_style, "", "in edge style (invis,solid,dashed,dotted,bold)")
+            CONFIG_FLD_STRING(dot_in_color, "", "in edge color")
+        CONFIG_END
+
+        static std::vector<dot_task_config> s_dot_configs;
+
+        static void explorer_setup_dot_configs()
+        {
+            dot_task_config default_config;
+            read_config("task..default", default_config, nullptr);
+
+            auto max_id = dsn_task_code_max();
+            s_dot_configs.resize((size_t)max_id + 1);
+
+            for (int i = 0; i <= max_id; i++)
             {
-                if (lb.substr(0, 4) == "RPC_")
-                    lb = lb.substr(4);
-                else if (lb.substr(0, 4) == "LPC_")
-                    lb = lb.substr(4);
-                else
-                    lb = lb;
+                auto& cfg = s_dot_configs[i];
+                char buffer[256];
+                sprintf(buffer, "task.%s", dsn_task_code_to_string((dsn_task_code_t)i));
+                read_config(buffer, cfg, &default_config);
+
+                if (cfg.dot_label.length() == 0)
+                {
+                    sprintf(buffer, "%d", i);
+                    cfg.dot_label = buffer;
+                }
             }
-            return lb;*/
         }
-        
+
+        static std::string explorer_get_task_props(int nid, int task_code)
+        {
+            auto& cfg = s_dot_configs[task_code];
+            std::stringstream ss;
+
+            ss << "label=\"" << cfg.dot_label << "\",style=" << cfg.dot_style << ",shape=" << cfg.dot_shape << ",color=" << cfg.dot_color;
+            return ss.str();
+        }
+
+        static std::string explorer_get_edge_props(int from_node, int from_tid, int to_node, int to_tid, uint64_t weight)
+        {
+            auto& cfg1 = s_dot_configs[from_tid];
+            auto& cfg2 = s_dot_configs[to_tid];
+            std::stringstream ss;
+
+            ss << "label=" << weight << ",style=";
+
+            // priority: vertex invis, source(outedge), dest(inedge)
+            if (cfg1.dot_style == "invis" || cfg2.dot_style == "invis")
+                ss << "invis";
+            else if (cfg1.dot_out_style.length() > 0)
+                ss << cfg1.dot_out_style;
+            else if (cfg2.dot_in_style.length() > 0)
+                ss << cfg2.dot_in_style;
+            else
+                ss << "solid";
+
+            ss << ",color=";
+            if (cfg1.dot_out_color.length() > 0)
+                ss << cfg1.dot_out_color;
+            else if (cfg2.dot_in_color.length() > 0)
+                ss << cfg2.dot_in_color;
+            else
+                ss << cfg1.dot_color;
+
+            return ss.str();
+        }
+                
+        DEFINE_TASK_CODE(LPC_CONTROL_SERVICE_APP, TASK_PRIORITY_HIGH, THREAD_POOL_DEFAULT)
         class per_node_task_explorer
         {
         public:
@@ -190,6 +263,7 @@ namespace dsn
                 }
             }
 
+            // intra node
             void draw_dot_graph1(
                 std::stringstream& ss, 
                 const std::unordered_set<int>& out_tasks, 
@@ -208,7 +282,8 @@ namespace dsn
                     if (exp->count() > 0 || out_tasks.find(i) != out_tasks.end())
                     {                        
                         // all used tasks in an node
-                        ss << "\t\t" << explorer_get_task_id(_node_id, i) << " [label=\"" << explorer_get_task_label(_node_id, i) << "\",style=filled];" << std::endl;
+                        ss << "\t\t" << explorer_get_task_id(_node_id, i) << " ["
+                            << explorer_get_task_props(_node_id, i) << "];" << std::endl;
                         all_tasks.emplace(i);
 
                         // all intra edges
@@ -219,7 +294,9 @@ namespace dsn
                                 ss << "\t\t"
                                     << explorer_get_task_id(_node_id, i) << " -> "
                                     << explorer_get_task_id(_node_id, j)
-                                    << " [label=" << exp->_locals[j] << "];"
+                                    << " ["
+                                    << explorer_get_edge_props(_node_id, i, _node_id, j, exp->_locals[j])
+                                    << "];"
                                     << std::endl;
                             }
                         }
@@ -231,11 +308,14 @@ namespace dsn
                 ss << "\t" << std::endl;
             }
 
+            
+            // inter-node
             void draw_dot_graph2(
                 std::stringstream& ss,
                 const std::map<uint64_t, per_node_task_explorer*>& lookup
-                )
+            )
             {
+                int edges_count = 0;
                 for (int i = 0; i < (int)_explorers.size(); i++)
                 {
                     auto& exp = _explorers[i];
@@ -247,7 +327,7 @@ namespace dsn
                             utils::auto_lock<utils::ex_lock_nr_spin> l(exp->_lock);
                             i_st = exp->_ins;
                         }
-                        
+
                         // all incoming edges
                         for (auto& kv : i_st)
                         {
@@ -265,7 +345,9 @@ namespace dsn
                                     ss << "\t"
                                         << explorer_get_task_id(from_node_id, fc_kv.first) << " -> "
                                         << explorer_get_task_id(_node_id, i)
-                                        << " [label=" << fc_kv.second << "];"
+                                        << " ["
+                                        << explorer_get_edge_props(from_node_id, fc_kv.first, _node_id, i, fc_kv.second)
+                                        << "];"
                                         << std::endl;
                                 }
 
@@ -279,9 +361,13 @@ namespace dsn
                                     ss << "\t"
                                         << kv.first << " -> "
                                         << explorer_get_task_id(_node_id, i)
-                                        << " [label=" << fc_kv.second << "];"
+                                        << " ["
+                                        << explorer_get_edge_props(from_node_id, fc_kv.first, _node_id, i, fc_kv.second)
+                                        << "];"
                                         << std::endl;
                                 }
+
+                                edges_count++;
                             }
                         }
                         //ss << "\t" << std::endl;
@@ -289,6 +375,16 @@ namespace dsn
                     //ss << "\t" << std::endl;
                 }
                 //ss << "\t" << std::endl;
+
+                if (edges_count > 0)
+                {
+                    // "oracle" -> "main"
+                    ss << "\t"
+                        << "dsn_run -> "
+                        << explorer_get_task_id(_node_id, LPC_CONTROL_SERVICE_APP)
+                        << " [label=1];"
+                        << std::endl;
+                }
             }
 
         private:
@@ -305,11 +401,19 @@ namespace dsn
             all_task_explorer()
             {
                 int count = dsn_get_all_apps(nullptr, 0) + 1;
-                _explorers.resize((size_t)count);
-
+                
                 dsn_app_info* apps = (dsn_app_info*)alloca(sizeof(dsn_app_info) * count);
                 memset(apps, 0, sizeof(dsn_app_info) * count);
                 count = dsn_get_all_apps(apps, count - 1);
+
+                int max_id = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    if (apps[i].app_id > max_id)
+                        max_id = apps[i].app_id;
+                }
+
+                _explorers.resize((size_t)(max_id + 1));
                 
                 for (int i = 0; i < count; i++)
                 {
@@ -329,9 +433,15 @@ namespace dsn
                 _explorers[task::get_current_node_id()].on_local_call(caller, callee);
             }
 
-            void get_dot_graph(std::stringstream& ss, const std::vector<std::string>& args)
+            void get_dot_graph(std::stringstream& ss, std::stringstream* labels, const std::vector<std::string>& args)
             {
+                std::stringstream* lss = &ss;
                 ss << "digraph G { " << std::endl;
+                if (labels) 
+                {
+                    *labels << "digraph G { " << std::endl;
+                    lss = labels;
+                }
 
                 // we only collect incoming messages at runtime
                 // therefore the statistics at the outgoing node may be missing
@@ -363,14 +473,16 @@ namespace dsn
                 }
 
                 // legend for all tasks
-                ss << "\tlegend [shape=record,label=\"{tasks";
+                *lss << "\tlegend [shape=record,label=\"{tasks";
                 for (auto& t : all_tasks)
                 {
-                    ss << "| {" << t << "|" << task_spec::get(t)->name << "}";
+                    *lss << "| {" << t << "|" << task_spec::get(t)->name << "}";
                 }
-                ss << "}\"];" << std::endl;
+                *lss << "}\"];" << std::endl;
 
                 ss << "}" << std::endl;
+
+                if (labels) *labels << "}" << std::endl;
             }
 
             
@@ -408,6 +520,24 @@ namespace dsn
                 break;            
             default:
                 break;
+            }
+        }
+
+        static void explorer_on_task_enqueue(task* caller, task* callee)
+        {
+            //callee->spec().type == dsn_task_type_t::TASK_TYPE_COMPUTE && 
+            if (caller)
+            {
+                task_ext_for_explorer::get(callee) = (uint64_t)(caller->spec().code);
+            }
+        }
+
+        static void explorer_on_aio_enqueue(aio_task* callee)
+        {
+            //callee->spec().type == dsn_task_type_t::TASK_TYPE_COMPUTE && 
+            if (task::get_current_task())
+            {
+                task_ext_for_explorer::get(callee) = (uint64_t)(task::get_current_task()->spec().code);
             }
         }
 
@@ -460,10 +590,31 @@ namespace dsn
             }
         }
 
+        // notify
+        static void explorer_on_task_wait_notified(task* task)
+        {            
+            // set notifier
+            task_ext_for_explorer::get(task) = task->spec().code;
+        }
+
+        // wait success or timeout
+        static void explorer_on_task_wait_post(task* caller, task* callee, bool succ)
+        {
+            auto notifier_code = task_ext_for_explorer::get(callee);
+            all_task_explorer::instance().on_local_call((dsn_task_code_t)notifier_code, caller->spec().code);
+        }
+        
         void explorer::install(service_spec& spec)
         {
+            dassert(get_current_tool()->name() == "emulator", 
+                "currently dsn.tools.explorer only works with the emulator tool, please set [core] tool = emulator"
+            );
+
+            std::string dot = dsn_config_get_value_string("tools.explorer", "dot", "", "the command path to dot to visualize the graph");            
             auto explore = dsn_config_get_value_bool("task..default", "is_explore", true, "whether to explore this kind of task");
             
+            explorer_setup_dot_configs();
+
             for (int i = 0; i <= dsn_task_code_max(); i++)
             {
                 if (i == TASK_CODE_INVALID)
@@ -479,20 +630,26 @@ namespace dsn
                 if (explore2)
                 {
                     spec->on_task_create.put_back(explorer_on_task_create, "explorer");
+                    spec->on_task_enqueue.put_back(explorer_on_task_enqueue, "explorer");
                     spec->on_task_begin.put_back(explorer_on_task_begin, "explorer");
                     spec->on_rpc_call.put_back(explorer_on_rpc_call, "explorer");
                     spec->on_rpc_reply.put_back(explorer_on_rpc_reply, "explorer");
                     spec->on_rpc_response_enqueue.put_back(explorer_on_rpc_response_enqueue, "explorer");
+                    spec->on_aio_enqueue.put_back(explorer_on_aio_enqueue, "explorer");
+                    spec->on_task_wait_notified.put_back(explorer_on_task_wait_notified, "explorer");
+                    spec->on_task_wait_post.put_back(explorer_on_task_wait_post, "explorer");
                 }
             }
 
             message_ext_for_explorer::register_ext();
             task_ext_for_explorer::register_ext();
             ::dsn::register_command({ "explore", "exp" },
-                "explore the task dependencies as GraphViz dot graph",
-                "explore the task dependencies as GraphViz dot graph",
-                [](const safe_vector<safe_string>& args) 
+                "explore the task dependencies as GraphViz dot graph (please set [tools.explorer] dot to produce pic immediately)",
+                "explore the task dependencies as GraphViz dot graph (please set [tools.explorer] dot to produce pic immediately)",
+                [dot](const safe_vector<safe_string>& args) 
                 {
+                    static int graph_index = 0;
+                    int gid = ++graph_index;
                     std::stringstream ss;
 
                     std::vector<std::string> args2;
@@ -500,8 +657,52 @@ namespace dsn
                     {
                         args2.push_back(std::string(e.c_str()));
                     }
-                    all_task_explorer::instance().get_dot_graph(ss, args2);
-                    return safe_string(ss.str().c_str());
+
+                    if (dot.length() > 0)
+                    {
+                        std::stringstream labels;
+                        all_task_explorer::instance().get_dot_graph(ss, &labels, args2);
+
+                        auto dir = dsn_get_app_data_dir();
+
+                        // graph
+                        {
+                            std::stringstream dotfile;
+                            dotfile << dir << "/exp-" << gid << ".dot";
+
+                            std::ofstream dotff(dotfile.str().c_str());
+                            dotff << ss.str();
+                            dotff.close();
+
+                            std::stringstream cmd;
+                            cmd << dot << " -Tjpg -o" << dir << "/exp-" << gid << ".jpg " << dir << "/exp-" << gid << ".dot";
+                            system(cmd.str().c_str());
+                        }
+
+                        // labels
+                        {
+                            std::stringstream dotfile;
+                            dotfile << dir << "/exp-" << gid << "-labels.dot";
+
+                            std::ofstream dotff(dotfile.str().c_str());
+                            dotff << labels.str();
+                            dotff.close();
+
+                            std::stringstream cmd;
+                            cmd << dot << " -Tjpg -o" << dir << "/exp-" << gid << "-labels.jpg " << dir << "/exp-" << gid << "-labels.dot";
+                            system(cmd.str().c_str());
+                        }
+
+                        // output
+                        std::stringstream output;
+                        output << "task deps dumped to " << dir << "/exp-" << gid << ".jpg with labels in exp-" << gid << "-labels.jpg";
+                        return safe_string(output.str().c_str());
+                    }
+                    else
+                    {
+                        all_task_explorer::instance().get_dot_graph(ss, nullptr, args2);
+                        return safe_string(ss.str().c_str());
+                    }    
                 }
                 );
         }
